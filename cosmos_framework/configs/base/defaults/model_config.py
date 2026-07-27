@@ -124,6 +124,28 @@ class FixedStepSamplerConfig:
 
 # Don't have any defaults and init only in config file.
 @attrs.define(slots=False)
+class HamletModelConfig:
+    """HAMLET episodic memory knobs for action-policy post-training.
+
+    Mirrors ``cosmos_framework.model.generator.mot.hamlet_memory.HamletConfig``.
+    Keep ``enabled=False`` unless history packing is also provided.
+    """
+
+    enabled: bool = False
+    n_moment_tokens: int = 4
+    memory_window: int = 4
+    memory_num_layers: int = 2
+    num_heads: int = 8
+    ffn_mult: int = 4
+    mem_cond_type: str = attrs.field(
+        default="cross_attn",
+        validator=attrs.validators.in_({"cross_attn", "adaln"}),
+    )
+    init_range: float = 0.02
+    rms_eps: float = 1e-5
+
+
+@attrs.define(slots=False)
 class OmniMoTModelConfig:
     """
     Config for Omni MoT model.
@@ -248,6 +270,11 @@ class OmniMoTModelConfig:
     action_gen: bool = False  # whether to use action related parameters and condition/generate action tokens
     max_action_dim: int = 32  # maximum dimension of the action space, we need to pad the data to this dimension.
     num_embodiment_domains: int = 32  # number of domains for the domain-aware linear layer
+
+    # HAMLET-style episodic memory for action policy (disabled by default).
+    # When enabled, OmniMoTModel builds a ``HamletMemory`` module; full history
+    # packing / conditioning in the training step is wired separately.
+    hamlet: HamletModelConfig = attrs.field(factory=HamletModelConfig)
 
     # sound configs
     sound_gen: bool = False  # whether to use sound related parameters and condition/generate sound tokens

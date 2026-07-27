@@ -41,6 +41,7 @@ from cosmos_framework.model.generator.mot.inference_text_kv_memory import (
     make_inference_text_kv_cache,
     restore_inference_attention_dispatch,
 )
+from cosmos_framework.model.generator.mot.hamlet_memory import HamletConfig, HamletMemory
 from cosmos_framework.model.generator.mot.modeling_utils import has_noisy_tokens
 from cosmos_framework.model.generator.mot.parallelize_vfm_network import parallelize_vfm_network
 from cosmos_framework.model.generator.reasoner.qwen3_vl.utils import tokenize_caption
@@ -103,6 +104,11 @@ class OmniMoTModel(ImaginaireModel):
 
         # 4. Build the denoiser network
         self.set_up_model()
+
+        # 4b. Optional HAMLET episodic memory (action-policy history). Built only
+        # when ``config.hamlet.enabled``; conditioning in training_step is a
+        # follow-up wiring step.
+        self.set_up_hamlet_memory()
 
         # 5. Set up training time scheduler and inference time sampler
         self.set_up_scheduler_and_sampler()
@@ -408,6 +414,41 @@ class OmniMoTModel(ImaginaireModel):
         this to allocate a KV cache.
         """
         pass
+
+    def set_up_hamlet_memory(self) -> None:
+        """Optionally build HAMLET episodic memory for action-policy history.
+
+        Distinct from ``set_up_memory`` (KV/compile cache). When
+        ``config.hamlet.enabled`` is False, ``self.hamlet`` is ``None``.
+        """
+        hamlet_cfg = getattr(self.config, "hamlet", None)
+        if hamlet_cfg is None or not hamlet_cfg.enabled:
+            self.hamlet = None
+            return
+        if not getattr(self.config, "action_gen", False):
+            log.warning("hamlet.enabled=True but action_gen=False; building HamletMemory anyway")
+        hidden_size = int(self.net.hidden_size)
+        module_cfg = HamletConfig(
+            enabled=True,
+            n_moment_tokens=hamlet_cfg.n_moment_tokens,
+            memory_window=hamlet_cfg.memory_window,
+            memory_num_layers=hamlet_cfg.memory_num_layers,
+            num_heads=hamlet_cfg.num_heads,
+            ffn_mult=hamlet_cfg.ffn_mult,
+            mem_cond_type=hamlet_cfg.mem_cond_type,
+            init_range=hamlet_cfg.init_range,
+            rms_eps=hamlet_cfg.rms_eps,
+        )
+        if hidden_size % module_cfg.num_heads != 0:
+            raise ValueError(
+                f"hamlet.num_heads={module_cfg.num_heads} must divide net.hidden_size={hidden_size}"
+            )
+        self.hamlet = HamletMemory(dim=hidden_size, config=module_cfg)
+        log.info(
+            f"HamletMemory enabled: n_q={module_cfg.n_moment_tokens} "
+            f"window={module_cfg.memory_window} layers={module_cfg.memory_num_layers} "
+            f"cond={module_cfg.mem_cond_type} dim={hidden_size}"
+        )
 
     def set_up_parallelism(self) -> None:
         """Set up the fsdp for the model."""
