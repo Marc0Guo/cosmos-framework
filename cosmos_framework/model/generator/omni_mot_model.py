@@ -446,13 +446,16 @@ class OmniMoTModel(ImaginaireModel):
                 f"hamlet.num_heads={module_cfg.num_heads} must divide net.hidden_size={hidden_size}"
             )
         self.hamlet = HamletMemory(dim=hidden_size, config=module_cfg)
+        # Match OmniMoT compute dtype (typically bfloat16) so Linear matmuls
+        # do not mix bf16 activations with fp32 weights.
+        self.hamlet = self.hamlet.to(device=DEVICE, dtype=self.precision)
         # Attach onto the VFM network so ``Cosmos3VFMNetwork.forward`` can
         # condition packed action tokens without threading a new arg.
         self.net.hamlet = self.hamlet
         log.info(
             f"HamletMemory enabled: n_q={module_cfg.n_moment_tokens} "
             f"window={module_cfg.memory_window} layers={module_cfg.memory_num_layers} "
-            f"cond={module_cfg.mem_cond_type} dim={hidden_size}"
+            f"cond={module_cfg.mem_cond_type} dim={hidden_size} dtype={self.precision}"
         )
 
     def set_up_parallelism(self) -> None:
