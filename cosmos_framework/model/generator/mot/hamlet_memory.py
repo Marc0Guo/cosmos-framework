@@ -367,16 +367,18 @@ def apply_hamlet_to_packed_actions(
         idxs = action_sequence_indexes[cursor : cursor + num_tokens]
         cursor += num_tokens
         action_feats = packed_sequence[idxs].unsqueeze(0)  # [1, T, D]
+        weight_dtype = next(hamlet.parameters()).dtype
         if moment_history is None:
             hist = hamlet.current_moment_embeddings(batch=1)
-            hist = hist.to(device=action_feats.device, dtype=action_feats.dtype)
             hist = hist.repeat(1, hamlet.config.memory_window, 1)
         else:
-            hist = moment_history.to(device=action_feats.device, dtype=action_feats.dtype)
+            hist = moment_history
+        hist = hist.to(device=action_feats.device, dtype=weight_dtype)
+        action_in = action_feats.to(dtype=weight_dtype)
         mem_out = hamlet.encode_history(hist)
         current = hamlet.memory.current_slice(mem_out)
         # Packing-safe length-preserving fuse (adaln-style) for both cond types.
-        conditioned = action_feats + current.mean(dim=1, keepdim=True)
+        conditioned = action_in + current.mean(dim=1, keepdim=True)
         packed_sequence[idxs] = conditioned.squeeze(0).to(dtype=packed_sequence.dtype)
 
 
