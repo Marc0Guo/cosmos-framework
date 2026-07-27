@@ -156,6 +156,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv-hamlet-cpu/
 env/
 venv/
 ENV/
