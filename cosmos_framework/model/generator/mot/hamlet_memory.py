@@ -339,6 +339,47 @@ def stack_moment_history(moment_steps: list[torch.Tensor]) -> torch.Tensor:
     return torch.cat(moment_steps, dim=-2)
 
 
+def apply_hamlet_to_packed_actions(
+    packed_sequence: torch.Tensor,
+    action_sequence_indexes: torch.Tensor,
+    token_shapes: list[tuple[int, ...]],
+    hamlet: "HamletMemory",
+    moment_history: torch.Tensor | None = None,
+) -> None:
+    """Condition flat packed action slots in-place with HAMLET (length-preserving).
+
+    Multi-sample packed sequences are handled sample-by-sample using
+    ``token_shapes``. When ``moment_history`` is None (no dataset history yet),
+    the learnable moment bank is repeated across the memory window so the
+    memory transformer still runs and receives gradients.
+
+    Both ``adaln`` and ``cross_attn`` write back with a length-preserving fuse
+    (mean-pool memory → add to action tokens). Full KV-concat ``cross_attn``
+    needs extra packed slots and is deferred.
+    """
+    if action_sequence_indexes.numel() == 0:
+        return
+    cursor = 0
+    for shape in token_shapes:
+        num_tokens = int(shape[0])
+        if num_tokens <= 0:
+            continue
+        idxs = action_sequence_indexes[cursor : cursor + num_tokens]
+        cursor += num_tokens
+        action_feats = packed_sequence[idxs].unsqueeze(0)  # [1, T, D]
+        if moment_history is None:
+            hist = hamlet.current_moment_embeddings(batch=1)
+            hist = hist.to(device=action_feats.device, dtype=action_feats.dtype)
+            hist = hist.repeat(1, hamlet.config.memory_window, 1)
+        else:
+            hist = moment_history.to(device=action_feats.device, dtype=action_feats.dtype)
+        mem_out = hamlet.encode_history(hist)
+        current = hamlet.memory.current_slice(mem_out)
+        # Packing-safe length-preserving fuse (adaln-style) for both cond types.
+        conditioned = action_feats + current.mean(dim=1, keepdim=True)
+        packed_sequence[idxs] = conditioned.squeeze(0).to(dtype=packed_sequence.dtype)
+
+
 class HamletMemory(nn.Module):
     """Bundle: moment tokens + memory transformer + conditioning helper."""
 

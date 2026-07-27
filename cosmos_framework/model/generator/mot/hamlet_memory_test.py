@@ -124,3 +124,31 @@ def test_current_moment_embeddings_from_bank() -> None:
     bundle = HamletMemory(dim=16, config=HamletConfig(enabled=True, n_moment_tokens=3, num_heads=4))
     emb = bundle.current_moment_embeddings(batch=2)
     assert emb.shape == (2, 3, 16)
+
+
+def test_apply_hamlet_to_packed_actions_preserves_length() -> None:
+    torch.manual_seed(0)
+    dim = 32
+    hamlet = HamletMemory(
+        dim=dim,
+        config=HamletConfig(
+            enabled=True,
+            n_moment_tokens=4,
+            memory_window=3,
+            memory_num_layers=1,
+            num_heads=4,
+            mem_cond_type="adaln",
+        ),
+    )
+    # Two samples, lengths 5 and 3, packed into a larger sequence buffer.
+    packed = torch.randn(20, dim)
+    idxs = torch.tensor([2, 3, 4, 5, 6, 10, 11, 12], dtype=torch.long)
+    shapes = [(5,), (3,)]
+    before = packed[idxs].clone()
+    from cosmos_framework.model.generator.mot.hamlet_memory import apply_hamlet_to_packed_actions
+
+    apply_hamlet_to_packed_actions(packed, idxs, shapes, hamlet)
+    after = packed[idxs]
+    assert after.shape == before.shape
+    assert torch.isfinite(after).all()
+    assert not torch.equal(after, before)

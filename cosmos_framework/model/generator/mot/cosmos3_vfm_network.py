@@ -15,6 +15,7 @@ from cosmos_framework.model.generator.mot.context_parallel_utils import (
     get_context_parallel_sharded_sequence,
 )
 from cosmos_framework.model.generator.mot.domain_aware_linear import DomainAwareLinear
+from cosmos_framework.model.generator.mot.hamlet_memory import apply_hamlet_to_packed_actions
 from cosmos_framework.model.generator.mot.modeling_utils import TimestepEmbedder, has_noisy_tokens
 from cosmos_framework.model.generator.utils.memory import MemoryState
 from cosmos_framework.data.generator.sequence_packing import ModalityData, PackedSequence
@@ -734,6 +735,27 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             packed_tokens_action  # [B_action*T_action,hidden_size] scattered into [N_total,hidden_size]
         )
 
+    def _maybe_apply_hamlet_to_actions(
+        self,
+        packed_seq: PackedSequence,
+        packed_sequence: torch.Tensor,
+    ) -> None:
+        """Optionally condition packed action embeddings with attached HamletMemory."""
+        hamlet = getattr(self, "hamlet", None)
+        if hamlet is None:
+            return
+        action = packed_seq.action
+        if action is None or action.token_shapes is None:
+            return
+        if not isinstance(action.sequence_indexes, torch.Tensor):
+            return
+        apply_hamlet_to_packed_actions(
+            packed_sequence,
+            action.sequence_indexes,
+            action.token_shapes,
+            hamlet,
+        )
+
     def _decode_action(
         self,
         packed_seq: PackedSequence,
@@ -932,6 +954,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         # encode action tokens
         if self.config.action_gen:
             self._encode_action(packed_seq, packed_sequence, target_dtype)
+            self._maybe_apply_hamlet_to_actions(packed_seq, packed_sequence)
 
         # encode sound tokens
         if self.config.sound_gen:
