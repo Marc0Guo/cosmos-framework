@@ -12,8 +12,11 @@ from cosmos_framework.model.generator.mot.hamlet_memory import (
     HamletMemory,
     MemoryTransformer,
     MomentTokenBank,
+    append_moment_embeddings,
     build_block_causal_allow_mask,
     condition_action_features,
+    slice_moment_hidden,
+    stack_moment_history,
 )
 
 
@@ -98,3 +101,26 @@ def test_hamlet_memory_bundle_forward() -> None:
     bundle.config.mem_cond_type = "adaln"
     out_adaln = bundle(action, history)
     assert out_adaln.shape == action.shape
+
+
+def test_append_and_slice_moment_embeddings() -> None:
+    text = torch.randn(2, 7, 16)
+    moments = torch.randn(2, 4, 16)
+    fused = append_moment_embeddings(text, moments)
+    assert fused.shape == (2, 11, 16)
+    sliced = slice_moment_hidden(fused, n_text=7, n_q=4)
+    assert torch.equal(sliced, moments)
+
+
+def test_stack_moment_history_oldest_to_newest() -> None:
+    steps = [torch.full((1, 2, 4), float(i)) for i in range(3)]
+    hist = stack_moment_history(steps)
+    assert hist.shape == (1, 6, 4)
+    assert torch.equal(hist[:, :2], steps[0])
+    assert torch.equal(hist[:, -2:], steps[2])
+
+
+def test_current_moment_embeddings_from_bank() -> None:
+    bundle = HamletMemory(dim=16, config=HamletConfig(enabled=True, n_moment_tokens=3, num_heads=4))
+    emb = bundle.current_moment_embeddings(batch=2)
+    assert emb.shape == (2, 3, 16)

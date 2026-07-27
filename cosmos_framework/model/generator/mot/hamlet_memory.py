@@ -290,6 +290,55 @@ def condition_action_features(
     raise ValueError(f"Unknown mem_cond_type={mem_cond_type!r}; expected 'cross_attn' or 'adaln'")
 
 
+def append_moment_embeddings(
+    und_embeddings: torch.Tensor,
+    moment_embeddings: torch.Tensor,
+) -> torch.Tensor:
+    """Append moment-token embeddings after understanding (text) embeddings.
+
+    Args:
+        und_embeddings: ``[B, L_text, D]`` or ``[L_text, D]`` packed text embeddings.
+        moment_embeddings: ``[B, n_q, D]`` or ``[n_q, D]`` moment embeddings.
+
+    Returns:
+        Concatenation along the sequence axis with moments last.
+    """
+    if und_embeddings.ndim != moment_embeddings.ndim:
+        raise ValueError(
+            f"rank mismatch: und_embeddings.ndim={und_embeddings.ndim} "
+            f"moment_embeddings.ndim={moment_embeddings.ndim}"
+        )
+    if und_embeddings.shape[-1] != moment_embeddings.shape[-1]:
+        raise ValueError(
+            f"dim mismatch: und {und_embeddings.shape[-1]} vs moment {moment_embeddings.shape[-1]}"
+        )
+    return torch.cat([und_embeddings, moment_embeddings], dim=-2)
+
+
+def slice_moment_hidden(
+    und_hidden: torch.Tensor,
+    n_text: int,
+    n_q: int,
+) -> torch.Tensor:
+    """Slice the trailing ``n_q`` und hidden states as moment outputs.
+
+    Assumes moments were appended after ``n_text`` text tokens.
+    """
+    if n_text < 0 or n_q < 1:
+        raise ValueError(f"need n_text>=0 and n_q>=1, got {n_text=}, {n_q=}")
+    seq = und_hidden.shape[-2]
+    if seq < n_text + n_q:
+        raise ValueError(f"und_hidden seq {seq} < n_text+n_q ({n_text}+{n_q})")
+    return und_hidden[..., n_text : n_text + n_q, :]
+
+
+def stack_moment_history(moment_steps: list[torch.Tensor]) -> torch.Tensor:
+    """Stack per-timestep moment hiddens ``[B, n_q, D]`` oldest→newest into ``[B, T*n_q, D]``."""
+    if not moment_steps:
+        raise ValueError("moment_steps must be non-empty")
+    return torch.cat(moment_steps, dim=-2)
+
+
 class HamletMemory(nn.Module):
     """Bundle: moment tokens + memory transformer + conditioning helper."""
 
@@ -308,6 +357,10 @@ class HamletMemory(nn.Module):
             rms_eps=cfg.rms_eps,
             init_range=cfg.init_range,
         )
+
+    def current_moment_embeddings(self, batch: int) -> torch.Tensor:
+        """Learnable moment embeddings for the current timestep: ``[B, n_q, D]``."""
+        return self.moment_tokens.expand(batch, window=1)
 
     def encode_history(self, moment_history: torch.Tensor | None = None) -> torch.Tensor:
         """Run memory over a ``[B, T*n_q, D]`` history (or expand bank if None)."""
