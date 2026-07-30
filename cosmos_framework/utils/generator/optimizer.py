@@ -203,10 +203,12 @@ def _build_params_with_metadata(
             )
         )
 
+    n_hamlet = sum(1 for pn, _ in params_with_metadata if "hamlet" in pn)
     log.info(
         f"Total tensors: {len(net_params)}, "
         f"trainable tensors: {len(param_dict)}, "
         f"selected tensors: {len(params_with_metadata)}"
+        + (f", hamlet tensors: {n_hamlet}" if n_hamlet else "")
     )
 
     return params_with_metadata
