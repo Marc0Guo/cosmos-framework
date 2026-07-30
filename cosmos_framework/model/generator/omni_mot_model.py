@@ -449,13 +449,18 @@ class OmniMoTModel(ImaginaireModel):
         # Match OmniMoT compute dtype (typically bfloat16) so Linear matmuls
         # do not mix bf16 activations with fp32 weights.
         self.hamlet = self.hamlet.to(device=DEVICE, dtype=self.precision)
+        # Built after LoRA freeze of ``net``; keep trainable so optimizer can
+        # pick them up when ``keys_to_select`` includes ``"hamlet"``.
+        self.hamlet.requires_grad_(True)
         # Attach onto the VFM network so ``Cosmos3VFMNetwork.forward`` can
         # condition packed action tokens without threading a new arg.
         self.net.hamlet = self.hamlet
+        n_train = sum(p.numel() for p in self.hamlet.parameters() if p.requires_grad)
         log.info(
             f"HamletMemory enabled: n_q={module_cfg.n_moment_tokens} "
             f"window={module_cfg.memory_window} layers={module_cfg.memory_num_layers} "
-            f"cond={module_cfg.mem_cond_type} dim={hidden_size} dtype={self.precision}"
+            f"cond={module_cfg.mem_cond_type} dim={hidden_size} dtype={self.precision} "
+            f"trainable_params={n_train:,}"
         )
 
     def set_up_parallelism(self) -> None:
@@ -583,6 +588,17 @@ class OmniMoTModel(ImaginaireModel):
     ) -> None:
         """Run aux-loss-free load balancing + EMA router de-sink on the gen-tower MoE blocks."""
         del scheduler, optimizer
+
+        # Cheap trainability check: log Hamlet grad norm a few times so we can
+        # tell whether episodic memory is actually receiving updates under LoRA.
+        hamlet = getattr(self, "hamlet", None)
+        if hamlet is not None and iteration < 5:
+            grads = [p.grad.detach().float() for p in hamlet.parameters() if p.grad is not None]
+            if grads:
+                gn = torch.norm(torch.stack([g.norm() for g in grads])).item()
+                log.info(f"HamletMemory grad_norm={gn:.6f} at iter={iteration}")
+            else:
+                log.warning(f"HamletMemory has no grads at iter={iteration} (frozen or unused?)")
 
         dp_mesh = self.parallel_dims.dp_mesh if self.parallel_dims else None
 

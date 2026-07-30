@@ -79,7 +79,7 @@ action_policy_libero_all_nano = LazyDict(
             betas=[0.9, 0.99],
             eps=1.0e-08,
             fused=True,  # popped by build_optimizer for FusedAdam (fused by construction)
-            # Train the generation + action heads.
+            # Train the generation + action heads (+ optional HAMLET memory).
             keys_to_select=[
                 "moe_gen",
                 "time_embedder",
@@ -88,12 +88,14 @@ action_policy_libero_all_nano = LazyDict(
                 "action2llm",
                 "llm2action",
                 "action_modality_embed",
+                "hamlet",
             ],
             lr=5.0e-05,
             lr_multipliers={
                 "action2llm": 5.0,
                 "llm2action": 5.0,
                 "action_modality_embed": 5.0,
+                "hamlet": 5.0,
             },
             optimizer_type="FusedAdam",
             weight_decay=0.05,
