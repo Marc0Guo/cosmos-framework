@@ -193,6 +193,7 @@ def test_memory_dim_bottleneck_shapes_and_params() -> None:
             memory_num_layers=1,
             num_heads=4,
             memory_dim=mem,
+            mem_cond_type="adaln",
         ),
     )
     assert hamlet.mem_dim == mem
@@ -208,6 +209,7 @@ def test_memory_dim_bottleneck_shapes_and_params() -> None:
             memory_num_layers=1,
             num_heads=4,
             memory_dim=0,
+            mem_cond_type="adaln",
         ),
     )
     n_full = sum(p.numel() for p in full.parameters())
