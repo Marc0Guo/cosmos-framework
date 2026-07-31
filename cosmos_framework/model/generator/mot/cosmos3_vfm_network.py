@@ -765,6 +765,28 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                     pad = hist_actions.new_zeros(bsz, window - k, hist_actions.shape[-1])
                     hist_actions = torch.cat([pad, hist_actions], dim=1)
                 k = window
+            # Optional: emphasize high-jump (failure-like) steps in the window.
+            if bool(getattr(hamlet.config, "failure_buffer", False)) and k >= 2:
+                jumps = (hist_actions[:, 1:, :] - hist_actions[:, :-1, :]).norm(dim=-1)  # [B, K-1]
+                thr = float(getattr(hamlet.config, "failure_jump_threshold", 0.35))
+                # Mark steps that follow a large jump; always keep the newest step.
+                fail_step = torch.zeros(bsz, k, dtype=torch.bool, device=hist_actions.device)
+                fail_step[:, 1:] = jumps > thr
+                fail_step[:, -1] = True
+                # Rebuild each sample: failure steps first (oldest→newest), then pad with newest.
+                rebuilt = []
+                for i in range(bsz):
+                    idx = torch.where(fail_step[i])[0]
+                    if idx.numel() == 0:
+                        idx = torch.arange(k, device=hist_actions.device)
+                    selected = hist_actions[i, idx]  # [F, A]
+                    if selected.shape[0] >= k:
+                        selected = selected[-k:]
+                    else:
+                        pad = selected[-1:].expand(k - selected.shape[0], -1)
+                        selected = torch.cat([pad, selected], dim=0)
+                    rebuilt.append(selected)
+                hist_actions = torch.stack(rebuilt, dim=0)
             # One domain id per sample (list of [1] tensors).
             domain_ids = action.domain_id
             per_sample = []

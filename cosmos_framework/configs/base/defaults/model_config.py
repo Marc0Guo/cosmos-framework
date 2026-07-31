@@ -145,6 +145,11 @@ class HamletModelConfig:
     rms_eps: float = 1e-5
     # Inner MemoryTransformer width; 0 = use model hidden_size.
     memory_dim: int = 0
+    # When True, emphasize high-jump past actions in the HAMLET history
+    # (DenseReward-style failure windows) instead of uniform chronological past-K.
+    failure_buffer: bool = False
+    # L2 jump threshold on consecutive past actions (normalized space).
+    failure_jump_threshold: float = 0.35
 
 
 @attrs.define(slots=False)

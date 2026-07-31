@@ -442,6 +442,8 @@ class OmniMoTModel(ImaginaireModel):
             init_range=hamlet_cfg.init_range,
             rms_eps=hamlet_cfg.rms_eps,
             memory_dim=mem_dim,
+            failure_buffer=bool(getattr(hamlet_cfg, "failure_buffer", False)),
+            failure_jump_threshold=float(getattr(hamlet_cfg, "failure_jump_threshold", 0.35)),
         )
         check_dim = mem_dim if mem_dim > 0 else hidden_size
         if check_dim % module_cfg.num_heads != 0:

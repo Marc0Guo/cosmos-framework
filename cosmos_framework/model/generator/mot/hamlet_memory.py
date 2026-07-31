@@ -43,6 +43,9 @@ class HamletConfig:
     # Inner width of MemoryTransformer / moment bank. 0 = use outer model dim.
     # Use e.g. 512 to avoid a ~0.5B-param memory tower at hidden_size=4096.
     memory_dim: int = 0
+    # Emphasize high action-jump steps in past-K history (failure windows).
+    failure_buffer: bool = False
+    failure_jump_threshold: float = 0.35
 
 
 def build_block_causal_allow_mask(window: int, n_q: int) -> torch.Tensor:
