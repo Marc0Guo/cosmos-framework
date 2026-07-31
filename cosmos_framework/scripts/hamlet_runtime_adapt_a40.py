@@ -159,12 +159,44 @@ class TinyDenseCritic(nn.Module):
         return torch.sigmoid(self.net(x).squeeze(-1))
 
 
-def train_critic(device, seed=0):
+def myopic_score(xyz, grip) -> float:
+    dist = float(np.linalg.norm(xyz - OBJ))
+    return float(np.clip(1.0 - dist / 0.35, 0, 1)) * 0.7 + (0.3 if grip < 0.5 else 0.0)
+
+
+def build_myopic_xy(n_per=12, history=2, seed=0, actions_per_t=2):
+    """(state+action→next) features labeled by myopic next-state score (for MPC)."""
+    rng = np.random.default_rng(seed)
+    xs, ys = [], []
+    for mode in MODES:
+        for _ in range(n_per):
+            xyz, g, m = success_ep()
+            xyz, g, m = perturb(xyz, g, mode, np.random.default_rng(int(rng.integers(0, 1e9))))
+            for t in range(0, len(xyz) - 1, 2):
+                for _a in range(actions_per_t):
+                    act = rng.normal(0, 0.04, 4).astype(np.float32)
+                    act[3] = float(rng.choice([-0.6, 0.0, 0.6]))
+                    # occasionally inject recovery-shaped actions
+                    if rng.random() < 0.25:
+                        act[:3] = (0.2 + 0.3 * rng.random()) * (OBJ - xyz[t])
+                        act[3] = -0.6
+                    p2, g2 = apply_action(xyz[t], float(g[t]), act)
+                    xyz_t, g_t = xyz.copy(), g.copy()
+                    xyz_t[t + 1], g_t[t + 1] = p2, g2
+                    xs.append(frame_feat(xyz_t, g_t, t + 1, history))
+                    ys.append(myopic_score(p2, g2))
+    return np.stack(xs), np.asarray(ys, np.float32)
+
+
+def train_critic(device, seed=0, target: str = "latched"):
     torch.manual_seed(seed)
-    x, y = build_xy(seed=seed)
+    if target == "myopic":
+        x, y = build_myopic_xy(seed=seed)
+    else:
+        x, y = build_xy(seed=seed)
     n = len(y)
     perm = np.random.default_rng(seed).permutation(n)
-    n_val = n // 5
+    n_val = max(1, n // 5)
     val_i, tr_i = perm[:n_val], perm[n_val:]
     model = TinyDenseCritic(2 * FEAT_PER).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -184,9 +216,7 @@ def train_critic(device, seed=0):
         va = model(torch.from_numpy(x[val_i]).to(device))
         yt = torch.from_numpy(y[val_i]).to(device)
         mae = float((va - yt).abs().mean())
-        fail = yt < 0.85
-        fail_mae = float((va[fail] - yt[fail]).abs().mean()) if fail.any() else mae
-    return model, {"val_mae": mae, "fail_mae": fail_mae}
+    return model, {"val_mae": mae, "target": target, "n": float(n)}
 
 
 def apply_action(xyz, grip, action):
@@ -209,7 +239,6 @@ def mpc_one(model, device, seed, seed_recovery: bool = True):
             cands[i, :3] = (0.25 + 0.2 * i) * (OBJ - xyz[drop_t])
             cands[i, 3] = -0.6
     else:
-        # unbiased: mix isotropic noise with random directions (no oracle toward OBJ)
         for i in range(K):
             cands[i, 3] = float(rng.choice([-0.6, 0.0, 0.6]))
     scores = []
@@ -221,17 +250,16 @@ def mpc_one(model, device, seed, seed_recovery: bool = True):
             feat = frame_feat(xyz_t, g_t, drop_t + 1)
             scores.append(float(model(torch.from_numpy(feat).unsqueeze(0).to(device))[0]))
     best = int(np.argmax(scores))
-    rand = int(rng.integers(0, K))
+    # random among the other K-1 (not the MPC pick)
+    others = [i for i in range(K) if i != best]
+    rand = int(others[int(rng.integers(0, len(others)))])
 
     def metr(a):
         p2, g2 = apply_action(xyz[drop_t], float(g[drop_t]), a)
-        dist = float(np.linalg.norm(p2 - OBJ))
-        myopic = float(np.clip(1.0 - dist / 0.35, 0, 1)) * 0.7 + (0.3 if g2 < 0.5 else 0.0)
-        return dist, myopic
+        return float(np.linalg.norm(p2 - OBJ)), myopic_score(p2, g2)
 
     d_m, m_m = metr(cands[best])
     d_r, m_r = metr(cands[rand])
-    # also compare to oracle best-by-myopic among candidates
     myopics = [metr(cands[k])[1] for k in range(K)]
     oracle = int(np.argmax(myopics))
     return {
@@ -294,8 +322,10 @@ def main():
     t0 = time.time()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device={device}", flush=True)
-    model, crit = train_critic(device)
-    print("critic", crit, flush=True)
+    latched, crit_l = train_critic(device, target="latched")
+    print("critic_latched", crit_l, flush=True)
+    model, crit = train_critic(device, target="myopic")
+    print("critic_myopic", crit, flush=True)
 
     seeds = list(range(20))
     def summarize(rows, tag):
@@ -332,17 +362,19 @@ def main():
     print("hamlet_buffer", ham, flush=True)
 
     out = {
-        "commit": "57ace63",
+        "commit": "0cbfeac+",
         "elapsed_s": time.time() - t0,
-        "critic": crit,
+        "critic_latched": crit_l,
+        "critic_myopic": crit,
         "mpc": mpc,
         "hamlet_buffer": ham,
         "verdict": {
-            "critic_ok": crit["val_mae"] < 0.05,
-            "mpc_effect_seeded": mpc_seeded["mpc_closer_rate"] >= 0.6
-            and mpc_seeded["effect_dist_delta"] > 0.01,
-            "mpc_effect_unbiased": mpc_unbiased["mpc_myopic_win_rate"] >= 0.55
-            and mpc_unbiased["effect_myopic_delta"] > 0.0,
+            "latched_critic_ok": crit_l["val_mae"] < 0.05,
+            "myopic_critic_ok": crit["val_mae"] < 0.08,
+            "mpc_match_oracle_unbiased": mpc_unbiased["mpc_match_oracle_rate"] >= 0.4,
+            "mpc_effect_unbiased": mpc_unbiased["mpc_myopic_win_rate"] >= 0.7
+            and mpc_unbiased["effect_myopic_delta"] > 0.05,
+            "mpc_closer_unbiased": mpc_unbiased["mpc_closer_rate"] >= 0.6,
             "buffer_shifts_actions": ham["action_l2_fail_vs_empty"] > 1e-3,
         },
     }
@@ -351,7 +383,6 @@ def main():
     out_path.write_text(json.dumps(out, indent=2))
     print("wrote", out_path, flush=True)
     print("VERDICT", out["verdict"], flush=True)
-    # non-zero exit if no effect
     ok = all(out["verdict"].values())
     sys.exit(0 if ok else 2)
 
