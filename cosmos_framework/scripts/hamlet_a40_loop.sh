@@ -10,6 +10,10 @@ source /workspace/run_cosmos3_framework.md 2>/dev/null || true
 export LIBERO_ROOT="${LIBERO_ROOT:-/workspace/data/LIBERO_LeRobot_v3/libero_10}"
 export BASE_CHECKPOINT_PATH="${BASE_CHECKPOINT_PATH:-examples/checkpoints/Cosmos3-Nano}"
 export WAN_VAE_PATH="${WAN_VAE_PATH:-examples/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
+# Container root is tiny (~30G); keep HF/uv caches on /workspace.
+export HF_HOME="${HF_HOME:-/workspace/caches/huggingface}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/caches/uv}"
 # Single A40 — launcher defaults to 8 ranks.
 export NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 export NNODES="${NNODES:-1}"
