@@ -180,3 +180,43 @@ def test_apply_hamlet_uses_per_sample_moment_history() -> None:
     s0 = packed[idxs[:4]].mean()
     s1 = packed[idxs[4:]].mean()
     assert not torch.isclose(s0, s1)
+
+
+def test_memory_dim_bottleneck_shapes_and_params() -> None:
+    outer, mem = 64, 16
+    hamlet = HamletMemory(
+        dim=outer,
+        config=HamletConfig(
+            enabled=True,
+            n_moment_tokens=4,
+            memory_window=2,
+            memory_num_layers=1,
+            num_heads=4,
+            memory_dim=mem,
+        ),
+    )
+    assert hamlet.mem_dim == mem
+    assert hamlet.outer_dim == outer
+    n = sum(p.numel() for p in hamlet.parameters())
+    # Far smaller than a full-width tower at outer=64.
+    full = HamletMemory(
+        dim=outer,
+        config=HamletConfig(
+            enabled=True,
+            n_moment_tokens=4,
+            memory_window=2,
+            memory_num_layers=1,
+            num_heads=4,
+            memory_dim=0,
+        ),
+    )
+    n_full = sum(p.numel() for p in full.parameters())
+    assert n < n_full
+    hist = torch.randn(2, 2 * 4, outer)
+    out = hamlet(torch.randn(2, 5, outer), hist)
+    assert out.shape == (2, 5, outer)
+    from cosmos_framework.model.generator.mot.hamlet_memory import apply_hamlet_to_packed_actions
+
+    packed = torch.randn(10, outer)
+    apply_hamlet_to_packed_actions(packed, torch.arange(6), [(6,)], hamlet)
+    assert torch.isfinite(packed[:6]).all()
