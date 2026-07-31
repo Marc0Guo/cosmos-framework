@@ -342,6 +342,107 @@ def stack_moment_history(moment_steps: list[torch.Tensor]) -> torch.Tensor:
     return torch.cat(moment_steps, dim=-2)
 
 
+class FailureMomentBuffer:
+    """Runtime ring buffer of failure moment embeddings (no weight update).
+
+    Stage-2 adaptation path: when dense reward drops (``Δr < threshold``),
+    commit the current moment block. ``as_history`` pads to a full HAMLET
+    window for ``HamletMemory.encode_history`` / packed-action fuse.
+    """
+
+    def __init__(
+        self,
+        n_q: int,
+        dim: int,
+        window: int,
+        delta_r_threshold: float = -0.02,
+    ):
+        if window < 1 or n_q < 1 or dim < 1:
+            raise ValueError(f"window/n_q/dim must be >= 1, got {window=}, {n_q=}, {dim=}")
+        self.n_q = int(n_q)
+        self.dim = int(dim)
+        self.window = int(window)
+        self.delta_r_threshold = float(delta_r_threshold)
+        self._slots: list[torch.Tensor] = []
+        self.write_count = 0
+
+    @classmethod
+    def from_hamlet(cls, hamlet: "HamletMemory", delta_r_threshold: float = -0.02) -> "FailureMomentBuffer":
+        cfg = hamlet.config
+        return cls(
+            n_q=cfg.n_moment_tokens,
+            dim=hamlet.outer_dim,
+            window=cfg.memory_window,
+            delta_r_threshold=delta_r_threshold,
+        )
+
+    def maybe_write(self, moment: torch.Tensor, r_t: float, r_prev: float) -> bool:
+        """Write ``moment`` if ``r_t - r_prev < delta_r_threshold``.
+
+        ``moment``: ``[n_q, D]`` or ``[1, n_q, D]`` in **outer** dim.
+        """
+        if moment.ndim == 3:
+            if moment.shape[0] != 1:
+                raise ValueError(f"batch moment must have B=1, got {moment.shape}")
+            moment = moment[0]
+        if moment.shape != (self.n_q, self.dim):
+            raise ValueError(f"expected moment shape {(self.n_q, self.dim)}, got {tuple(moment.shape)}")
+        if (float(r_t) - float(r_prev)) >= self.delta_r_threshold:
+            return False
+        self._slots.append(moment.detach().to(dtype=torch.float32).cpu().clone())
+        if len(self._slots) > self.window:
+            self._slots = self._slots[-self.window :]
+        self.write_count += 1
+        return True
+
+    @property
+    def num_slots(self) -> int:
+        return len(self._slots)
+
+    def clear(self) -> None:
+        self._slots.clear()
+        self.write_count = 0
+
+    def as_history(self, batch: int = 1, pad: torch.Tensor | None = None) -> torch.Tensor:
+        """Stacked history ``[B, window * n_q, D]`` oldest→newest."""
+        if batch < 1:
+            raise ValueError(f"batch must be >= 1, got {batch}")
+        if pad is None:
+            pad = torch.zeros(self.n_q, self.dim, dtype=torch.float32)
+        elif pad.shape != (self.n_q, self.dim):
+            raise ValueError(f"pad shape must be {(self.n_q, self.dim)}, got {tuple(pad.shape)}")
+        slots = list(self._slots)
+        while len(slots) < self.window:
+            slots.insert(0, pad.clone())
+        hist = torch.cat(slots[-self.window :], dim=0)
+        return hist.unsqueeze(0).expand(batch, -1, -1).contiguous()
+
+
+def rank_action_candidates_by_reward(
+    candidate_features: torch.Tensor,
+    reward_scores: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Stage-3 MPC helper: rank K candidates by predicted dense reward.
+
+    Args:
+        candidate_features: ``[K, ...]`` opaque action / state features (unused for
+            ranking itself; returned reordered for convenience).
+        reward_scores: ``[K]`` predicted ``r`` (higher is better).
+
+    Returns:
+        ``(order, sorted_scores)`` where ``order`` is indices best→worst.
+    """
+    if reward_scores.ndim != 1:
+        raise ValueError(f"reward_scores must be 1D [K], got {tuple(reward_scores.shape)}")
+    k = reward_scores.shape[0]
+    if candidate_features.shape[0] != k:
+        raise ValueError(
+            f"candidate batch {candidate_features.shape[0]} != scores {k}"
+        )
+    order = torch.argsort(reward_scores, descending=True)
+    return order, reward_scores[order]
+
+
 def apply_hamlet_to_packed_actions(
     packed_sequence: torch.Tensor,
     action_sequence_indexes: torch.Tensor,
@@ -452,3 +553,18 @@ class HamletMemory(nn.Module):
         mem_out = self.encode_history(moment_history)
         current = self.current_to_outer(self.memory.current_slice(mem_out))
         return condition_action_features(action_features, current, self.config.mem_cond_type)
+
+    def condition_with_failure_buffer(
+        self,
+        action_features: torch.Tensor,
+        buffer: FailureMomentBuffer,
+        *,
+        pad_from_bank: bool = True,
+    ) -> torch.Tensor:
+        """Stage-2 path: condition actions using failure-written moments (frozen policy)."""
+        pad = None
+        if pad_from_bank:
+            pad = self.current_moment_embeddings(1)[0].detach().cpu()
+        hist = buffer.as_history(batch=action_features.shape[0], pad=pad)
+        hist = hist.to(device=action_features.device, dtype=action_features.dtype)
+        return self.forward(action_features, hist)

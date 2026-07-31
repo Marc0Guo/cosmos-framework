@@ -222,3 +222,60 @@ def test_memory_dim_bottleneck_shapes_and_params() -> None:
     packed = torch.randn(10, outer)
     apply_hamlet_to_packed_actions(packed, torch.arange(6), [(6,)], hamlet)
     assert torch.isfinite(packed[:6]).all()
+
+
+def test_failure_moment_buffer_write_and_history() -> None:
+    from cosmos_framework.model.generator.mot.hamlet_memory import FailureMomentBuffer
+
+    buf = FailureMomentBuffer(n_q=2, dim=8, window=3, delta_r_threshold=-0.02)
+    assert not buf.maybe_write(torch.randn(2, 8), r_t=0.5, r_prev=0.4)  # progress
+    assert buf.num_slots == 0
+    m0 = torch.ones(2, 8)
+    assert buf.maybe_write(m0, r_t=0.3, r_prev=0.5)  # drop
+    assert buf.num_slots == 1
+    assert buf.write_count == 1
+    # fill beyond window → keep last window
+    for i in range(5):
+        buf.maybe_write(torch.full((2, 8), float(i)), r_t=0.0, r_prev=1.0)
+    assert buf.num_slots == 3
+    hist = buf.as_history(batch=2)
+    assert hist.shape == (2, 3 * 2, 8)
+    assert torch.equal(hist[0], hist[1])
+
+
+def test_failure_buffer_conditions_hamlet_without_weight_update() -> None:
+    from cosmos_framework.model.generator.mot.hamlet_memory import FailureMomentBuffer
+
+    torch.manual_seed(0)
+    cfg = HamletConfig(
+        enabled=True,
+        n_moment_tokens=4,
+        memory_window=3,
+        memory_num_layers=1,
+        num_heads=4,
+        memory_dim=16,
+        mem_cond_type="adaln",
+    )
+    hamlet = HamletMemory(dim=32, config=cfg)
+    params_before = {k: v.detach().clone() for k, v in hamlet.state_dict().items()}
+    buf = FailureMomentBuffer.from_hamlet(hamlet, delta_r_threshold=-0.01)
+    for i in range(2):
+        buf.maybe_write(torch.randn(4, 32), r_t=0.2 - 0.1 * i, r_prev=0.5)
+    action = torch.randn(2, 5, 32)
+    out = hamlet.condition_with_failure_buffer(action, buf)
+    assert out.shape == action.shape
+    assert torch.isfinite(out).all()
+    # No parameter updates from the write/condition path.
+    for k, v in hamlet.state_dict().items():
+        assert torch.equal(v, params_before[k])
+
+
+def test_rank_action_candidates_by_reward() -> None:
+    from cosmos_framework.model.generator.mot.hamlet_memory import rank_action_candidates_by_reward
+
+    feats = torch.arange(12, dtype=torch.float32).view(3, 4)
+    scores = torch.tensor([0.2, 0.9, 0.5])
+    order, sorted_scores = rank_action_candidates_by_reward(feats, scores)
+    assert torch.equal(order, torch.tensor([1, 2, 0]))
+    assert torch.allclose(sorted_scores, torch.tensor([0.9, 0.5, 0.2]))
+    assert torch.equal(feats[order][0], feats[1])
