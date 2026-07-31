@@ -430,6 +430,7 @@ class OmniMoTModel(ImaginaireModel):
         if not getattr(self.config, "action_gen", False):
             log.warning("hamlet.enabled=True but action_gen=False; building HamletMemory anyway")
         hidden_size = int(self.net.hidden_size)
+        mem_dim = int(getattr(hamlet_cfg, "memory_dim", 0) or 0)
         module_cfg = HamletConfig(
             enabled=True,
             n_moment_tokens=hamlet_cfg.n_moment_tokens,
@@ -440,10 +441,13 @@ class OmniMoTModel(ImaginaireModel):
             mem_cond_type=hamlet_cfg.mem_cond_type,
             init_range=hamlet_cfg.init_range,
             rms_eps=hamlet_cfg.rms_eps,
+            memory_dim=mem_dim,
         )
-        if hidden_size % module_cfg.num_heads != 0:
+        check_dim = mem_dim if mem_dim > 0 else hidden_size
+        if check_dim % module_cfg.num_heads != 0:
             raise ValueError(
-                f"hamlet.num_heads={module_cfg.num_heads} must divide net.hidden_size={hidden_size}"
+                f"hamlet num_heads={module_cfg.num_heads} must divide "
+                f"memory_dim/hidden_size={check_dim}"
             )
         self.hamlet = HamletMemory(dim=hidden_size, config=module_cfg)
         # Match OmniMoT compute dtype (typically bfloat16) so Linear matmuls
@@ -459,7 +463,8 @@ class OmniMoTModel(ImaginaireModel):
         log.info(
             f"HamletMemory enabled: n_q={module_cfg.n_moment_tokens} "
             f"window={module_cfg.memory_window} layers={module_cfg.memory_num_layers} "
-            f"cond={module_cfg.mem_cond_type} dim={hidden_size} dtype={self.precision} "
+            f"cond={module_cfg.mem_cond_type} outer_dim={hidden_size} "
+            f"mem_dim={self.hamlet.mem_dim} dtype={self.precision} "
             f"trainable_params={n_train:,}"
         )
 

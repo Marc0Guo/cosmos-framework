@@ -143,6 +143,8 @@ class HamletModelConfig:
     )
     init_range: float = 0.02
     rms_eps: float = 1e-5
+    # Inner MemoryTransformer width; 0 = use model hidden_size.
+    memory_dim: int = 0
 
 
 @attrs.define(slots=False)

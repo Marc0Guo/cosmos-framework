@@ -40,6 +40,9 @@ class HamletConfig:
     mem_cond_type: str = "cross_attn"  # "cross_attn" | "adaln"
     init_range: float = 0.02
     rms_eps: float = 1e-5
+    # Inner width of MemoryTransformer / moment bank. 0 = use outer model dim.
+    # Use e.g. 512 to avoid a ~0.5B-param memory tower at hidden_size=4096.
+    memory_dim: int = 0
 
 
 def build_block_causal_allow_mask(window: int, n_q: int) -> torch.Tensor:
@@ -370,8 +373,10 @@ def apply_hamlet_to_packed_actions(
         action_feats = packed_sequence[idxs].unsqueeze(0)  # [1, T, D]
         weight_dtype = next(hamlet.parameters()).dtype
         if moment_history is None:
-            hist = hamlet.current_moment_embeddings(batch=1)
-            hist = hist.repeat(1, hamlet.config.memory_window, 1)
+            # Synthetic: expand learnable bank directly in mem_dim (no in/out roundtrip).
+            hist = hamlet.moment_tokens.expand(1, window=hamlet.config.memory_window)
+            hist = hist.to(device=action_feats.device, dtype=weight_dtype)
+            mem_out = hamlet.memory(hist)
         else:
             if sample_i >= moment_history.shape[0]:
                 raise ValueError(
@@ -379,10 +384,10 @@ def apply_hamlet_to_packed_actions(
                     f"(at least {sample_i + 1})"
                 )
             hist = moment_history[sample_i : sample_i + 1]
-        hist = hist.to(device=action_feats.device, dtype=weight_dtype)
+            hist = hist.to(device=action_feats.device, dtype=weight_dtype)
+            mem_out = hamlet.encode_history(hist)
         action_in = action_feats.to(dtype=weight_dtype)
-        mem_out = hamlet.encode_history(hist)
-        current = hamlet.memory.current_slice(mem_out)
+        current = hamlet.current_to_outer(hamlet.memory.current_slice(mem_out))
         # Packing-safe length-preserving fuse (adaln-style) for both cond types.
         conditioned = action_in + current.mean(dim=1, keepdim=True)
         packed_sequence[idxs] = conditioned.squeeze(0).to(dtype=packed_sequence.dtype)
@@ -390,15 +395,30 @@ def apply_hamlet_to_packed_actions(
 
 
 class HamletMemory(nn.Module):
-    """Bundle: moment tokens + memory transformer + conditioning helper."""
+    """Bundle: moment tokens + memory transformer + conditioning helper.
+
+    ``dim`` is the outer model width (action token dim). When
+    ``config.memory_dim > 0`` and differs from ``dim``, history / moments run
+    at ``memory_dim`` with Linear in/out projections.
+    """
 
     def __init__(self, dim: int, config: HamletConfig | None = None):
         super().__init__()
         self.config = config or HamletConfig(enabled=True)
         cfg = self.config
-        self.moment_tokens = MomentTokenBank(cfg.n_moment_tokens, dim, cfg.init_range)
+        self.outer_dim = int(dim)
+        mem_dim = int(cfg.memory_dim) if cfg.memory_dim and cfg.memory_dim > 0 else self.outer_dim
+        self.mem_dim = mem_dim
+        if mem_dim % cfg.num_heads != 0:
+            raise ValueError(f"memory_dim={mem_dim} must be divisible by num_heads={cfg.num_heads}")
+        self.in_proj = nn.Identity() if mem_dim == self.outer_dim else nn.Linear(self.outer_dim, mem_dim, bias=False)
+        self.out_proj = nn.Identity() if mem_dim == self.outer_dim else nn.Linear(mem_dim, self.outer_dim, bias=False)
+        if not isinstance(self.in_proj, nn.Identity):
+            nn.init.normal_(self.in_proj.weight, mean=0.0, std=cfg.init_range)
+            nn.init.normal_(self.out_proj.weight, mean=0.0, std=cfg.init_range)
+        self.moment_tokens = MomentTokenBank(cfg.n_moment_tokens, mem_dim, cfg.init_range)
         self.memory = MemoryTransformer(
-            dim=dim,
+            dim=mem_dim,
             n_q=cfg.n_moment_tokens,
             window=cfg.memory_window,
             num_layers=cfg.memory_num_layers,
@@ -409,14 +429,19 @@ class HamletMemory(nn.Module):
         )
 
     def current_moment_embeddings(self, batch: int) -> torch.Tensor:
-        """Learnable moment embeddings for the current timestep: ``[B, n_q, D]``."""
-        return self.moment_tokens.expand(batch, window=1)
+        """Learnable moment embeddings in **outer** dim: ``[B, n_q, D_outer]``."""
+        emb = self.moment_tokens.expand(batch, window=1)  # [B, n_q, mem_dim]
+        return self.out_proj(emb)
 
     def encode_history(self, moment_history: torch.Tensor | None = None) -> torch.Tensor:
-        """Run memory over a ``[B, T*n_q, D]`` history (or expand bank if None)."""
+        """Run memory over a ``[B, T*n_q, D_outer]`` history (projected to mem_dim)."""
         if moment_history is None:
             raise ValueError("moment_history is required; pass stacked post-VLM moment states")
-        return self.memory(moment_history)
+        return self.memory(self.in_proj(moment_history))
+
+    def current_to_outer(self, current: torch.Tensor) -> torch.Tensor:
+        """Map ``[B, n_q, mem_dim]`` current slice back to outer dim."""
+        return self.out_proj(current)
 
     def forward(
         self,
@@ -425,5 +450,5 @@ class HamletMemory(nn.Module):
     ) -> torch.Tensor:
         """Encode history and condition action features with the current slice."""
         mem_out = self.encode_history(moment_history)
-        current = self.memory.current_slice(mem_out)
+        current = self.current_to_outer(self.memory.current_slice(mem_out))
         return condition_action_features(action_features, current, self.config.mem_cond_type)
