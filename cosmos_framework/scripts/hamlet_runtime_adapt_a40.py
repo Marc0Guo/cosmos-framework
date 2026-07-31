@@ -195,7 +195,7 @@ def apply_action(xyz, grip, action):
     return nxt, float(np.clip(grip + float(action[3]), 0, 1))
 
 
-def mpc_one(model, device, seed):
+def mpc_one(model, device, seed, seed_recovery: bool = True):
     rng = np.random.default_rng(seed)
     xyz, g, m = success_ep()
     xyz, g, m = perturb(xyz, g, "fall", rng)
@@ -203,10 +203,15 @@ def mpc_one(model, device, seed):
     dr = np.diff(r, prepend=r[0])
     drop_t = int(np.clip(np.argmin(dr), PHASE_LEN * 3, len(xyz) - 2))
     K = 16
-    cands = rng.normal(0, 0.015, (K, 4)).astype(np.float32)
-    for i in range(4):
-        cands[i, :3] = (0.25 + 0.2 * i) * (OBJ - xyz[drop_t])
-        cands[i, 3] = -0.6
+    cands = rng.normal(0, 0.03, (K, 4)).astype(np.float32)
+    if seed_recovery:
+        for i in range(4):
+            cands[i, :3] = (0.25 + 0.2 * i) * (OBJ - xyz[drop_t])
+            cands[i, 3] = -0.6
+    else:
+        # unbiased: mix isotropic noise with random directions (no oracle toward OBJ)
+        for i in range(K):
+            cands[i, 3] = float(rng.choice([-0.6, 0.0, 0.6]))
     scores = []
     with torch.no_grad():
         for k in range(K):
@@ -216,7 +221,7 @@ def mpc_one(model, device, seed):
             feat = frame_feat(xyz_t, g_t, drop_t + 1)
             scores.append(float(model(torch.from_numpy(feat).unsqueeze(0).to(device))[0]))
     best = int(np.argmax(scores))
-    rand = int(rng.integers(4, K))
+    rand = int(rng.integers(0, K))
 
     def metr(a):
         p2, g2 = apply_action(xyz[drop_t], float(g[drop_t]), a)
@@ -226,13 +231,18 @@ def mpc_one(model, device, seed):
 
     d_m, m_m = metr(cands[best])
     d_r, m_r = metr(cands[rand])
+    # also compare to oracle best-by-myopic among candidates
+    myopics = [metr(cands[k])[1] for k in range(K)]
+    oracle = int(np.argmax(myopics))
     return {
         "dist_mpc": d_m,
         "dist_rand": d_r,
+        "dist_oracle": metr(cands[oracle])[0],
         "myopic_mpc": m_m,
         "myopic_rand": m_r,
         "closer": float(d_m <= d_r),
         "myopic_win": float(m_m >= m_r),
+        "match_oracle": float(best == oracle),
         "writes": float(np.sum(dr < -0.02)),
     }
 
@@ -288,27 +298,35 @@ def main():
     print("critic", crit, flush=True)
 
     seeds = list(range(20))
-    rows = [mpc_one(model, device, s) for s in seeds]
-    closer = float(np.mean([r["closer"] for r in rows]))
-    myopic_win = float(np.mean([r["myopic_win"] for r in rows]))
-    dist_mpc = float(np.mean([r["dist_mpc"] for r in rows]))
-    dist_rand = float(np.mean([r["dist_rand"] for r in rows]))
-    myopic_mpc = float(np.mean([r["myopic_mpc"] for r in rows]))
-    myopic_rand = float(np.mean([r["myopic_rand"] for r in rows]))
-    writes = float(np.mean([r["writes"] for r in rows]))
-    mpc = {
-        "n_seeds": len(seeds),
-        "mpc_closer_rate": closer,
-        "mpc_myopic_win_rate": myopic_win,
-        "mean_dist_mpc": dist_mpc,
-        "mean_dist_rand": dist_rand,
-        "mean_myopic_mpc": myopic_mpc,
-        "mean_myopic_rand": myopic_rand,
-        "mean_failure_writes": writes,
-        "effect_dist_delta": dist_rand - dist_mpc,
-        "effect_myopic_delta": myopic_mpc - myopic_rand,
-    }
-    print("mpc", mpc, flush=True)
+    def summarize(rows, tag):
+        closer = float(np.mean([r["closer"] for r in rows]))
+        myopic_win = float(np.mean([r["myopic_win"] for r in rows]))
+        dist_mpc = float(np.mean([r["dist_mpc"] for r in rows]))
+        dist_rand = float(np.mean([r["dist_rand"] for r in rows]))
+        myopic_mpc = float(np.mean([r["myopic_mpc"] for r in rows]))
+        myopic_rand = float(np.mean([r["myopic_rand"] for r in rows]))
+        writes = float(np.mean([r["writes"] for r in rows]))
+        match_oracle = float(np.mean([r.get("match_oracle", 0.0) for r in rows]))
+        return {
+            "tag": tag,
+            "n_seeds": len(seeds),
+            "mpc_closer_rate": closer,
+            "mpc_myopic_win_rate": myopic_win,
+            "mpc_match_oracle_rate": match_oracle,
+            "mean_dist_mpc": dist_mpc,
+            "mean_dist_rand": dist_rand,
+            "mean_myopic_mpc": myopic_mpc,
+            "mean_myopic_rand": myopic_rand,
+            "mean_failure_writes": writes,
+            "effect_dist_delta": dist_rand - dist_mpc,
+            "effect_myopic_delta": myopic_mpc - myopic_rand,
+        }
+
+    mpc_seeded = summarize([mpc_one(model, device, s, seed_recovery=True) for s in seeds], "seeded_recovery")
+    mpc_unbiased = summarize([mpc_one(model, device, s, seed_recovery=False) for s in seeds], "unbiased_noise")
+    print("mpc_seeded", mpc_seeded, flush=True)
+    print("mpc_unbiased", mpc_unbiased, flush=True)
+    mpc = {"seeded": mpc_seeded, "unbiased": mpc_unbiased}
 
     ham = hamlet_buffer_effect()
     print("hamlet_buffer", ham, flush=True)
@@ -321,7 +339,10 @@ def main():
         "hamlet_buffer": ham,
         "verdict": {
             "critic_ok": crit["val_mae"] < 0.05,
-            "mpc_effect": closer >= 0.6 and (dist_rand - dist_mpc) > 0.01,
+            "mpc_effect_seeded": mpc_seeded["mpc_closer_rate"] >= 0.6
+            and mpc_seeded["effect_dist_delta"] > 0.01,
+            "mpc_effect_unbiased": mpc_unbiased["mpc_myopic_win_rate"] >= 0.55
+            and mpc_unbiased["effect_myopic_delta"] > 0.0,
             "buffer_shifts_actions": ham["action_l2_fail_vs_empty"] > 1e-3,
         },
     }
