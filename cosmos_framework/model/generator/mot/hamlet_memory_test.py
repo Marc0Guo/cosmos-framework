@@ -152,3 +152,31 @@ def test_apply_hamlet_to_packed_actions_preserves_length() -> None:
     assert after.shape == before.shape
     assert torch.isfinite(after).all()
     assert not torch.equal(after, before)
+
+
+def test_apply_hamlet_uses_per_sample_moment_history() -> None:
+    torch.manual_seed(0)
+    dim, n_q, window = 32, 4, 3
+    hamlet = HamletMemory(
+        dim=dim,
+        config=HamletConfig(
+            enabled=True,
+            n_moment_tokens=n_q,
+            memory_window=window,
+            memory_num_layers=1,
+            num_heads=4,
+        ),
+    )
+    packed = torch.zeros(20, dim)
+    idxs = torch.tensor([2, 3, 4, 5, 10, 11], dtype=torch.long)
+    shapes = [(4,), (2,)]
+    # Distinct histories per sample so per-sample indexing is exercised.
+    hist = torch.randn(2, window * n_q, dim)
+    from cosmos_framework.model.generator.mot.hamlet_memory import apply_hamlet_to_packed_actions
+
+    apply_hamlet_to_packed_actions(packed, idxs, shapes, hamlet, moment_history=hist)
+    assert torch.isfinite(packed[idxs]).all()
+    # Different histories should yield different offsets on the two samples.
+    s0 = packed[idxs[:4]].mean()
+    s1 = packed[idxs[4:]].mean()
+    assert not torch.isclose(s0, s1)
