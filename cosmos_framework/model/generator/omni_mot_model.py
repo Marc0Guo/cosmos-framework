@@ -1081,6 +1081,16 @@ class OmniMoTModel(ImaginaireModel):
         # Move packed sequence to CUDA
         packed_sequence.to_cuda()
 
+        # Stash past-K actions for HamletMemory (consumed in VFM forward).
+        if getattr(self, "hamlet", None) is not None:
+            hist = data_batch.get("hamlet_history_action")
+            if isinstance(hist, torch.Tensor):
+                self.net._hamlet_history_action = hist.to(
+                    device=DEVICE, dtype=self.precision, non_blocking=True
+                )
+            else:
+                self.net._hamlet_history_action = None
+
         # Network forward pass
         memory = self.build_memory_state(packed_sequence, memory_info)  # pylint: disable=assignment-from-none
         out_net = self.denoise(

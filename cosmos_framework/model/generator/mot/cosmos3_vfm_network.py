@@ -749,12 +749,46 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             return
         if not isinstance(action.sequence_indexes, torch.Tensor):
             return
+
+        moment_history = None
+        hist_actions = getattr(self, "_hamlet_history_action", None)
+        if isinstance(hist_actions, torch.Tensor) and hist_actions.ndim == 3:
+            # [B, K, A] past actions → [B, K*n_q, D] via action2llm + tile.
+            bsz, k, _a = hist_actions.shape
+            n_q = int(hamlet.config.n_moment_tokens)
+            window = int(hamlet.config.memory_window)
+            if k != window:
+                # Truncate or left-pad to configured window.
+                if k > window:
+                    hist_actions = hist_actions[:, -window:, :]
+                else:
+                    pad = hist_actions.new_zeros(bsz, window - k, hist_actions.shape[-1])
+                    hist_actions = torch.cat([pad, hist_actions], dim=1)
+                k = window
+            # One domain id per sample (list of [1] tensors).
+            domain_ids = action.domain_id
+            per_sample = []
+            for i in range(min(bsz, len(action.token_shapes))):
+                d_id = domain_ids[i].to(device=hist_actions.device)
+                flat = hist_actions[i]  # [K, A]
+                d_exp = d_id.expand(k)
+                proj = self.action2llm(flat, d_exp)  # [K, D]
+                # Tile each step into n_q moment slots: [K, n_q, D] → [K*n_q, D]
+                tiled = proj.unsqueeze(1).expand(-1, n_q, -1).reshape(k * n_q, -1)
+                per_sample.append(tiled)
+            if per_sample:
+                moment_history = torch.stack(per_sample, dim=0)
+
         apply_hamlet_to_packed_actions(
             packed_sequence,
             action.sequence_indexes,
             action.token_shapes,
             hamlet,
+            moment_history=moment_history,
         )
+        # Consume one-shot stash from training_step.
+        if hasattr(self, "_hamlet_history_action"):
+            self._hamlet_history_action = None
 
     def _decode_action(
         self,

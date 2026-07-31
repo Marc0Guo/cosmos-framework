@@ -360,6 +360,7 @@ def apply_hamlet_to_packed_actions(
     if action_sequence_indexes.numel() == 0:
         return
     cursor = 0
+    sample_i = 0
     for shape in token_shapes:
         num_tokens = int(shape[0])
         if num_tokens <= 0:
@@ -372,7 +373,12 @@ def apply_hamlet_to_packed_actions(
             hist = hamlet.current_moment_embeddings(batch=1)
             hist = hist.repeat(1, hamlet.config.memory_window, 1)
         else:
-            hist = moment_history
+            if sample_i >= moment_history.shape[0]:
+                raise ValueError(
+                    f"moment_history batch {moment_history.shape[0]} < action samples needed "
+                    f"(at least {sample_i + 1})"
+                )
+            hist = moment_history[sample_i : sample_i + 1]
         hist = hist.to(device=action_feats.device, dtype=weight_dtype)
         action_in = action_feats.to(dtype=weight_dtype)
         mem_out = hamlet.encode_history(hist)
@@ -380,6 +386,7 @@ def apply_hamlet_to_packed_actions(
         # Packing-safe length-preserving fuse (adaln-style) for both cond types.
         conditioned = action_in + current.mean(dim=1, keepdim=True)
         packed_sequence[idxs] = conditioned.squeeze(0).to(dtype=packed_sequence.dtype)
+        sample_i += 1
 
 
 class HamletMemory(nn.Module):

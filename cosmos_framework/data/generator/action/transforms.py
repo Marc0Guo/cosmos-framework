@@ -706,6 +706,12 @@ class ActionTransformPipeline:
                 action,
                 action_normalizer=action_normalizer,
             )
+            # Pad HAMLET past-K history to max_action_dim (do not prepend into action stream).
+            hist = data_dict.get("hamlet_history_action")
+            if isinstance(hist, torch.Tensor):
+                from cosmos_framework.data.generator.action.action_processing import pad_action_to_max_dim
+
+                data_dict["hamlet_history_action"] = pad_action_to_max_dim(hist, self.max_action_dim)
         else:
             # Nullify action-related fields when action is not needed so the
             # collate function can simply stack all non-None actions.
@@ -714,5 +720,6 @@ class ActionTransformPipeline:
             data_dict["action"] = None
             data_dict["domain_id"] = None
             data_dict["action_processing_record"] = None
+            data_dict.pop("hamlet_history_action", None)
 
         return data_dict

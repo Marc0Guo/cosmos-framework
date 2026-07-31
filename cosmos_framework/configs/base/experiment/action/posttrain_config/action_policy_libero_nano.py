@@ -218,6 +218,8 @@ action_policy_libero_nano = LazyDict(
                             cfg_dropout_rate=0.1,
                             format_prompt_as_json=True,  # structured JSON prompts (set False for plain-text)
                             tokenizer_config="${model.config.vlm_config.tokenizer}",
+                            # Past-K actions for HAMLET (used when model.config.hamlet.enabled).
+                            hamlet_memory_window="${model.config.hamlet.memory_window}",
                         ),
                     ),
                 ),

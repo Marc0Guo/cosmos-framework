@@ -83,11 +83,14 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
         val_ratio: float = 0.01,
         seed: int = 0,
         sample_stride: int = 1,
+        hamlet_memory_window: int = 0,
     ) -> None:
         if action_space != "frame_wise_relative":
             raise NotImplementedError(
                 f"This LIBERO dataset only supports action_space='frame_wise_relative', got {action_space!r}."
             )
+        if hamlet_memory_window < 0:
+            raise ValueError(f"hamlet_memory_window must be >= 0, got {hamlet_memory_window}")
         if camera_mode not in _VIEWPOINT_BY_CAMERA:
             raise ValueError(f"Unsupported camera_mode={camera_mode!r}. Use image/wrist_image/concat_view.")
         split = split.lower().strip()
@@ -127,6 +130,8 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
         self._pose_coordinate_frame = pose_coordinate_frame
         self._embodiment_type = embodiment_type
         self._requested_normalization = action_normalization
+        # Past-K actions for HAMLET MemoryTransformer (0 = disabled / synthetic bank).
+        self._hamlet_memory_window = int(hamlet_memory_window)
         # quantile_rot normalizes against the raw (un-orthonormalized) rotation stats
         # under "global_raw"; everything else uses "global".
         self._stats_key = "global_raw" if action_normalization == "quantile_rot" else "global"
@@ -293,7 +298,30 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
             extras["additional_view_description"] = (
                 "The left half shows the third-person view; the right half shows the wrist-mounted camera."
             )
-        return self._build_result(mode=mode, video=video, action=action, ai_caption=ai_caption, **extras)
+        k = self._hamlet_memory_window
+        if k > 0:
+            # Contiguous past-K actions within the episode (left-pad at episode start).
+            ep_start = int(self._ep_starts[ep])
+            avail = max(0, start - ep_start)
+            hist_len = min(k, avail)
+            if hist_len > 0:
+                raw_hist = self._row_action[start - hist_len : start]
+                hist_action = self._build_frame_wise_action(raw_hist)
+            else:
+                hist_action = torch.zeros(0, action.shape[-1], dtype=action.dtype)
+            if hist_action.shape[0] < k:
+                pad = torch.zeros(k - hist_action.shape[0], action.shape[-1], dtype=action.dtype)
+                hist_action = torch.cat([pad, hist_action], dim=0)
+            extras["hamlet_history_action"] = hist_action  # [K, A] unnormalized; normalized below
+        result = self._build_result(mode=mode, video=video, action=action, ai_caption=ai_caption, **extras)
+        hist = result.get("hamlet_history_action")
+        if isinstance(hist, torch.Tensor) and self.action_normalization is not None:
+            from cosmos_framework.data.generator.action.action_normalization import normalize_action
+
+            result["hamlet_history_action"] = normalize_action(
+                hist, self.action_normalization, self._load_norm_stats()
+            )
+        return result
 
     def _build_frame_wise_action(self, raw: np.ndarray) -> torch.Tensor:
         raw_t = torch.from_numpy(np.ascontiguousarray(raw)).float()  # [chunk, 7]
