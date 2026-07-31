@@ -42,15 +42,18 @@ mean_last() {
   python - <<PY
 import re, statistics, sys
 from pathlib import Path
-vals = []
+by = {}
 candidates = [Path("$log")]
 candidates += list(Path("$out_dir").glob("logs/*.log"))
 for path in candidates:
     if not path.is_file():
         continue
     text = path.read_text(errors="ignore")
-    for m in re.finditer(r"Iteration\s+\d+:.*?Loss:\s*([0-9]+(?:\.[0-9]+)?)", text):
-        vals.append(float(m.group(1)))
+    for m in re.finditer(r"Iteration\s+(\d+):.*?Loss:\s*([0-9.]+)", text):
+        by[int(m.group(1))] = float(m.group(2))
+    for m in re.finditer(r"\]\s*(\d+)\s*:\s*iter_speed.*?Loss:\s*([0-9.]+)", text):
+        by[int(m.group(1))] = float(m.group(2))
+vals = [by[k] for k in sorted(by)]
 if not vals:
     print("nan\tnan\tnan")
     sys.exit(0)
