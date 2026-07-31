@@ -276,3 +276,14 @@ def test_failure_buffer_config_defaults() -> None:
     assert cfg.failure_jump_threshold == 0.4
     hamlet = HamletMemory(dim=32, config=HamletConfig(enabled=True, num_heads=4, failure_buffer=True))
     assert hamlet.config.failure_buffer is True
+
+
+def test_rank_action_candidates_by_reward() -> None:
+    from cosmos_framework.model.generator.mot.hamlet_memory import rank_action_candidates_by_reward
+
+    feats = torch.arange(12, dtype=torch.float32).view(3, 4)
+    scores = torch.tensor([0.2, 0.9, 0.5])
+    order, sorted_scores = rank_action_candidates_by_reward(feats, scores)
+    assert torch.equal(order, torch.tensor([1, 2, 0]))
+    assert torch.allclose(sorted_scores, torch.tensor([0.9, 0.5, 0.2]))
+    assert torch.equal(feats[order][0], feats[1])
